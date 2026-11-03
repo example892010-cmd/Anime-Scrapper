@@ -9,3 +9,4 @@ pytz
 humanize
 pyromod
 ffmpeg-python
+imageio-ffmpeg
