@@ -1,154 +1,139 @@
-from helper.database import codeflixbots as db
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from config import Txt
+from helper.database import codeflixbots as db
 
-@Client.on_message(filters.command("metadata"))
-async def metadata(client, message):
-    user_id = message.from_user.id
 
-    # Fetch user metadata from the database
-    current = await db.get_metadata(user_id)
-    title = await db.get_title(user_id)
-    author = await db.get_author(user_id)
-    artist = await db.get_artist(user_id)
-    video = await db.get_video(user_id)
-    audio = await db.get_audio(user_id)
-    subtitle = await db.get_subtitle(user_id)
+def _is_enabled(value):
+    # Older database records used boolean True; newer records use "On"/"Off".
+    return value is True or str(value).strip().lower() in {"on", "true", "1", "yes"}
 
-    # Display the current metadata
-    text = f"""
-**㊋ Yᴏᴜʀ Mᴇᴛᴀᴅᴀᴛᴀ ɪꜱ ᴄᴜʀʀᴇɴᴛʟʏ: {current}**
 
-**◈ Tɪᴛʟᴇ ▹** `{title if title else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aᴜᴛʜᴏʀ ▹** `{author if author else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aʀᴛɪꜱᴛ ▹** `{artist if artist else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aᴜᴅɪᴏ ▹** `{audio if audio else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Sᴜʙᴛɪᴛʟᴇ ▹** `{subtitle if subtitle else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Vɪᴅᴇᴏ ▹** `{video if video else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-    """
-
-    # Inline buttons to toggle metadata
-    buttons = [
-        [
-            InlineKeyboardButton(f"On{' ✅' if current == 'On' else ''}", callback_data='on_metadata'),
-            InlineKeyboardButton(f"Off{' ✅' if current == 'Off' else ''}", callback_data='off_metadata')
-        ],
-        [
-            InlineKeyboardButton("How to Set Metadata", callback_data="metainfo")
-        ]
+async def _metadata_text(user_id):
+    enabled = _is_enabled(await db.get_metadata(user_id))
+    values = {
+        "Title": await db.get_title(user_id),
+        "Author": await db.get_author(user_id),
+        "Artist": await db.get_artist(user_id),
+        "Audio": await db.get_audio(user_id),
+        "Subtitle": await db.get_subtitle(user_id),
+        "Video": await db.get_video(user_id),
+    }
+    lines = [
+        f"**㊋ Metadata: {'ON ✅' if enabled else 'OFF ❌'}**",
+        "",
     ]
-    keyboard = InlineKeyboardMarkup(buttons)
+    for label, value in values.items():
+        value = value or "Not set"
+        safe_value = str(value).replace("`", "'")
+        lines.append(f"**◈ {label} ▹** `{safe_value}`")
+    return "\n".join(lines), enabled
 
-    await message.reply_text(text=text, reply_markup=keyboard, disable_web_page_preview=True)
+
+def _keyboard(enabled):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"On{' ✅' if enabled else ''}", callback_data="on_metadata"
+            ),
+            InlineKeyboardButton(
+                f"Off{' ✅' if not enabled else ''}", callback_data="off_metadata"
+            ),
+        ],
+        [InlineKeyboardButton("How to Set Metadata", callback_data="metainfo")],
+    ])
 
 
-@Client.on_callback_query(filters.regex(r"on_metadata|off_metadata|metainfo"))
+@Client.on_message(filters.private & filters.command("metadata"))
+async def metadata_command(client, message):
+    if not message.from_user:
+        return
+    try:
+        text, enabled = await _metadata_text(message.from_user.id)
+        await message.reply_text(
+            text,
+            reply_markup=_keyboard(enabled),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        await message.reply_text(
+            "❌ Could not load metadata settings. Please check the MongoDB connection "
+            "and try /start once, then send /metadata again."
+        )
+
+
+@Client.on_callback_query(filters.regex(r"^(on_metadata|off_metadata|metainfo)$"))
 async def metadata_callback(client, query: CallbackQuery):
     user_id = query.from_user.id
-    data = query.data
+    action = query.data
 
-    if data == "on_metadata":
-        await db.set_metadata(user_id, "On")
-    elif data == "off_metadata":
-        await db.set_metadata(user_id, "Off")
-    elif data == "metainfo":
+    try:
+        if action == "metainfo":
+            await query.answer()
+            await query.message.edit_text(
+                Txt.META_TXT,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Home", callback_data="home"),
+                    InlineKeyboardButton("Close", callback_data="close"),
+                ]]),
+            )
+            return
+
+        await db.set_metadata(user_id, "On" if action == "on_metadata" else "Off")
+        text, enabled = await _metadata_text(user_id)
+        await query.answer("Metadata enabled" if enabled else "Metadata disabled")
         await query.message.edit_text(
-            text=Txt.META_TXT,
+            text,
+            reply_markup=_keyboard(enabled),
             disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Hᴏᴍᴇ", callback_data="home"),
-                    InlineKeyboardButton("close", callback_data="close")
-                ]
-            ])
+        )
+    except Exception as exc:
+        await query.answer("Could not update metadata. Check the database.", show_alert=True)
+
+
+async def _save_value(message, setter, label):
+    if len(message.command) < 2:
+        await message.reply_text(
+            f"Send a value after the command.\nExample: `/{message.command[0]} Your {label}`"
         )
         return
-
-    # Fetch updated metadata after toggling
-    current = await db.get_metadata(user_id)
-    title = await db.get_title(user_id)
-    author = await db.get_author(user_id)
-    artist = await db.get_artist(user_id)
-    video = await db.get_video(user_id)
-    audio = await db.get_audio(user_id)
-    subtitle = await db.get_subtitle(user_id)
-
-    # Updated metadata message after toggle
-    text = f"""
-**㊋ Yᴏᴜʀ Mᴇᴛᴀᴅᴀᴛᴀ ɪꜱ ᴄᴜʀʀᴇɴᴛʟʏ: {current}**
-
-**◈ Tɪᴛʟᴇ ▹** `{title if title else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aᴜᴛʜᴏʀ ▹** `{author if author else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aʀᴛɪꜱᴛ ▹** `{artist if artist else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Aᴜᴅɪᴏ ▹** `{audio if audio else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Sᴜʙᴛɪᴛʟᴇ ▹** `{subtitle if subtitle else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-**◈ Vɪᴅᴇᴏ ▹** `{video if video else 'Nᴏᴛ ꜰᴏᴜɴᴅ'}`  
-    """
-
-    # Update inline buttons
-    buttons = [
-        [
-            InlineKeyboardButton(f"On{' ✅' if current == 'On' else ''}", callback_data='on_metadata'),
-            InlineKeyboardButton(f"Off{' ✅' if current == 'Off' else ''}", callback_data='off_metadata')
-        ],
-        [
-            InlineKeyboardButton("How to Set Metadata", callback_data="metainfo")
-        ]
-    ]
-    await query.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+    value = message.text.split(maxsplit=1)[1].strip()
+    if not value:
+        await message.reply_text(f"Please provide a {label.lower()}.")
+        return
+    try:
+        await setter(message.from_user.id, value)
+        await message.reply_text(f"✅ {label} saved.")
+    except Exception:
+        await message.reply_text("❌ Could not save that value. Please check the database.")
 
 
-@Client.on_message(filters.private & filters.command('settitle'))
-async def title(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Tɪᴛʟᴇ\n\nExᴀᴍᴩʟᴇ:- /settitle Encoded By @Animes_Cruise**")
-    title = message.text.split(" ", 1)[1]
-    await db.set_title(message.from_user.id, title=title)
-    await message.reply_text("**✅ Tɪᴛʟᴇ Sᴀᴠᴇᴅ**")
+@Client.on_message(filters.private & filters.command("settitle"))
+async def set_title(client, message):
+    await _save_value(message, db.set_title, "Title")
 
-@Client.on_message(filters.private & filters.command('setauthor'))
-async def author(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Aᴜᴛʜᴏʀ\n\nExᴀᴍᴩʟᴇ:- /setauthor @Animes_Cruise**")
-    author = message.text.split(" ", 1)[1]
-    await db.set_author(message.from_user.id, author=author)
-    await message.reply_text("**✅ Aᴜᴛʜᴏʀ Sᴀᴠᴇᴅ**")
 
-@Client.on_message(filters.private & filters.command('setartist'))
-async def artist(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Aʀᴛɪꜱᴛ\n\nExᴀᴍᴩʟᴇ:- /setartist @Animes_Cruise**")
-    artist = message.text.split(" ", 1)[1]
-    await db.set_artist(message.from_user.id, artist=artist)
-    await message.reply_text("**✅ Aʀᴛɪꜱᴛ Sᴀᴠᴇᴅ**")
+@Client.on_message(filters.private & filters.command("setauthor"))
+async def set_author(client, message):
+    await _save_value(message, db.set_author, "Author")
 
-@Client.on_message(filters.private & filters.command('setaudio'))
-async def audio(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Aᴜᴅɪᴏ Tɪᴛʟᴇ\n\nExᴀᴍᴩʟᴇ:- /setaudio @Animes_Cruise**")
-    audio = message.text.split(" ", 1)[1]
-    await db.set_audio(message.from_user.id, audio=audio)
-    await message.reply_text("**✅ Aᴜᴅɪᴏ Sᴀᴠᴇᴅ**")
 
-@Client.on_message(filters.private & filters.command('setsubtitle'))
-async def subtitle(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Sᴜʙᴛɪᴛʟᴇ Tɪᴛʟᴇ\n\nExᴀᴍᴩʟᴇ:- /setsubtitle @Animes_Cruise**")
-    subtitle = message.text.split(" ", 1)[1]
-    await db.set_subtitle(message.from_user.id, subtitle=subtitle)
-    await message.reply_text("**✅ Sᴜʙᴛɪᴛʟᴇ Sᴀᴠᴇᴅ**")
+@Client.on_message(filters.private & filters.command("setartist"))
+async def set_artist(client, message):
+    await _save_value(message, db.set_artist, "Artist")
 
-@Client.on_message(filters.private & filters.command('setvideo'))
-async def video(client, message):
-    if len(message.command) == 1:
-        return await message.reply_text(
-            "**Gɪᴠᴇ Tʜᴇ Vɪᴅᴇᴏ Tɪᴛʟᴇ\n\nExᴀᴍᴩʟᴇ:- /setvideo Encoded by @Animes_Cruise**")
-    video = message.text.split(" ", 1)[1]
-    await db.set_video(message.from_user.id, video=video)
-    await message.reply_text("**✅ Vɪᴅᴇᴏ Sᴀᴠᴇᴅ**")
+
+@Client.on_message(filters.private & filters.command("setaudio"))
+async def set_audio(client, message):
+    await _save_value(message, db.set_audio, "Audio title")
+
+
+@Client.on_message(filters.private & filters.command("setsubtitle"))
+async def set_subtitle(client, message):
+    await _save_value(message, db.set_subtitle, "Subtitle title")
+
+
+@Client.on_message(filters.private & filters.command("setvideo"))
+async def set_video(client, message):
+    await _save_value(message, db.set_video, "Video title")
